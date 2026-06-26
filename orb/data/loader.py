@@ -85,6 +85,52 @@ def _minute_times(start: dt.time, end: dt.time) -> set:
 OR_TIMES = _minute_times(config.OR_START, config.OR_END)
 ENTRY_TIMES = _minute_times(config.OR_END, config.ENTRY_WINDOW_LAST_CLOSE)
 
+# Minutes the flatten leads the close (15:50 vs 16:00 => 10). On an early-close
+# day the required flatten bar shifts by the same lead (13:00 close => 12:50).
+_BASE = dt.date(2000, 1, 1)
+FLATTEN_LEAD_MIN = int(
+    (dt.datetime.combine(_BASE, config.RTH_END)
+     - dt.datetime.combine(_BASE, config.TIME_EXIT)).total_seconds() // 60
+)
+
+
+def _required_exit_time(close_t: dt.time) -> dt.time:
+    """The flatten bar a session must contain, given its scheduled close.
+
+    Full day: 16:00 close -> 15:50 (= config.TIME_EXIT). Early close 13:00 -> 12:50.
+    """
+    base = dt.datetime.combine(_BASE, close_t)
+    return (base - dt.timedelta(minutes=FLATTEN_LEAD_MIN)).time()
+
+
+# --- NYSE (XNYS) calendar: the authoritative set of trading sessions ------
+
+_NYSE = None
+
+
+def _nyse_calendar():
+    global _NYSE
+    if _NYSE is None:
+        import pandas_market_calendars as mcal  # heavy, lazy import
+        _NYSE = mcal.get_calendar("XNYS")
+    return _NYSE
+
+
+def expected_sessions(start_date, end_date) -> dict:
+    """XNYS trading sessions in [start_date, end_date] inclusive.
+
+    Returns {date: {'close_time': ET time, 'early_close': bool}}. A date NOT in
+    this dict was a market holiday (or weekend) and is correctly absent -- never
+    a skip. A date IN this dict but missing from the data is a 'no_data' outage.
+    """
+    cal = _nyse_calendar()
+    sched = cal.schedule(start_date=str(start_date), end_date=str(end_date))
+    out = {}
+    for ts, row in sched.iterrows():
+        close_et = row["market_close"].tz_convert(config.SESSION_TZ).time()
+        out[ts.date()] = {"close_time": close_et, "early_close": close_et != config.RTH_END}
+    return out
+
 
 # --- normalization --------------------------------------------------------
 
@@ -136,45 +182,73 @@ def _fmt_missing(times) -> str:
     return shown
 
 
-def validate_sessions(rth: pd.DataFrame, symbol: str):
-    """Split RTH 1-min bars into usable vs skipped sessions.
+def validate_sessions(rth: pd.DataFrame, symbol: str, schedule: dict | None = None):
+    """Split RTH 1-min bars into usable vs skipped sessions, against the XNYS calendar.
 
-    Returns (clean_bars, skips, session_dates):
+    Returns (clean_bars, skips, expected_dates, off_calendar):
       clean_bars    : RTH 1-min bars for usable sessions only (sorted)
       skips         : list of {symbol, date, reason, detail}
-      session_dates : every ET session date seen (usable + skipped)
-    A session is usable iff its OR window (09:30-09:45) is complete, its
-    entry-window 1-min coverage (09:45-11:00) has no gaps, AND the 15:50 flatten
-    bar exists (else the position could not be flattened and would leak forward).
+      expected_dates: XNYS trading days in the data's date range (the universe)
+      off_calendar  : dates present in the data that XNYS says were NOT trading
+                      days (data error; flagged, excluded from clean)
+
+    The universe is the set of XNYS trading days between the first and last dates
+    present in the data. For each:
+      - absent in data        -> 'no_data' skip (a real outage, not a holiday)
+      - early-close day        -> 'half_day' skip while SKIP_HALF_DAYS is True;
+                                  otherwise validated against its actual close
+      - OR window incomplete   -> 'or_window_incomplete'
+      - entry-window gap        -> 'entry_window_gap'
+      - missing flatten bar     -> 'exit_bar_missing' (flatten time tracks the
+                                   scheduled close: 15:50 full day, 12:50 early)
+      - else                    -> usable
+    Holidays (not XNYS trading days) are simply not in the universe -> never skips.
+    `schedule` may be injected (tests); otherwise it is the real XNYS calendar.
     """
     session.assert_clean_et_index(rth)
-    keys = session.session_date(rth.index)
+    if rth.empty:
+        return rth.copy(), [], [], []
 
-    usable_frames, skips, all_dates = [], [], []
-    for d, g in rth.groupby(keys):
-        all_dates.append(d)
+    groups = {d: g for d, g in rth.groupby(session.session_date(rth.index))}
+    data_dates = sorted(groups)
+    if schedule is None:
+        schedule = expected_sessions(data_dates[0], data_dates[-1])
+    expected = sorted(schedule)
+    off_calendar = [d for d in data_dates if d not in schedule]
+
+    usable_frames, skips = [], []
+    for d in expected:
+        g = groups.get(d)
+        if g is None:
+            skips.append({"symbol": symbol, "date": d, "reason": "no_data",
+                          "detail": "expected XNYS trading day with no bars (outage)"})
+            continue
+        info = schedule[d]
+        if info["early_close"] and config.SKIP_HALF_DAYS:
+            skips.append({"symbol": symbol, "date": d, "reason": "half_day",
+                          "detail": f"early close {info['close_time'].strftime('%H:%M')} ET "
+                                    f"(SKIP_HALF_DAYS)"})
+            continue
         present = set(g.index.time)
         miss_or = sorted(OR_TIMES - present)
         miss_entry = sorted(ENTRY_TIMES - present)
+        req_exit = _required_exit_time(info["close_time"])
         if miss_or:
-            skips.append({"symbol": symbol, "date": d,
-                          "reason": "or_window_incomplete",
+            skips.append({"symbol": symbol, "date": d, "reason": "or_window_incomplete",
                           "detail": f"missing {len(miss_or)}: {_fmt_missing(miss_or)}"})
         elif miss_entry:
-            skips.append({"symbol": symbol, "date": d,
-                          "reason": "entry_window_gap",
+            skips.append({"symbol": symbol, "date": d, "reason": "entry_window_gap",
                           "detail": f"missing {len(miss_entry)}: {_fmt_missing(miss_entry)}"})
-        elif config.TIME_EXIT not in present:
-            skips.append({"symbol": symbol, "date": d,
-                          "reason": "exit_bar_missing",
-                          "detail": f"no {config.TIME_EXIT.strftime('%H:%M')} flatten bar "
-                                    f"(scheduled early close / 15:50 gap)"})
+        elif req_exit not in present:
+            skips.append({"symbol": symbol, "date": d, "reason": "exit_bar_missing",
+                          "detail": f"no {req_exit.strftime('%H:%M')} flatten bar "
+                                    f"(close {info['close_time'].strftime('%H:%M')})"})
         else:
             usable_frames.append(g)
 
     clean = (pd.concat(usable_frames).sort_index()
              if usable_frames else rth.iloc[0:0].copy())
-    return clean, skips, all_dates
+    return clean, skips, expected, off_calendar
 
 
 def detect_split_jumps(clean: pd.DataFrame):
@@ -210,37 +284,43 @@ def detect_split_jumps(clean: pd.DataFrame):
 
 # --- coverage report ------------------------------------------------------
 
-def build_coverage(symbol: str, all_dates, skips, clean: pd.DataFrame) -> dict:
-    """Assemble the coverage report for one symbol."""
+def build_coverage(symbol: str, expected_dates, skips, clean: pd.DataFrame,
+                   off_calendar=()) -> dict:
+    """Assemble the coverage report for one symbol.
+
+    The universe is `expected_dates` (XNYS trading days in range), so
+    usable + skipped == total_sessions and holidays never appear. `off_calendar`
+    (bars on non-trading days) is reported separately as a data-integrity flag.
+    """
     skip_dates = {s["date"] for s in skips}
-    usable_dates = sorted(d for d in all_dates if d not in skip_dates)
-    all_sorted = sorted(all_dates)
+    expected = sorted(expected_dates)
+    usable_dates = sorted(d for d in expected if d not in skip_dates)
 
     reasons = {}
     for s in skips:
         reasons[s["reason"]] = reasons.get(s["reason"], 0) + 1
 
     per_year = {}
-    for d in all_sorted:
-        y = d.year
-        per_year.setdefault(y, {"usable": 0, "skipped": 0})
+    for d in expected:
+        per_year.setdefault(d.year, {"usable": 0, "skipped": 0})
     for d in usable_dates:
         per_year[d.year]["usable"] += 1
     for s in skips:
         per_year[s["date"].year]["skipped"] += 1
-    for y, c in per_year.items():
+    for c in per_year.values():
         tot = c["usable"] + c["skipped"]
         c["skip_rate"] = (c["skipped"] / tot) if tot else 0.0
 
     return {
         "symbol": symbol,
-        "total_sessions": len(all_sorted),
+        "total_sessions": len(expected),
         "usable_sessions": len(usable_dates),
         "skipped_sessions": len(skips),
         "skip_reasons": reasons,
         "per_year": per_year,
         "first_usable": usable_dates[0] if usable_dates else None,
         "last_usable": usable_dates[-1] if usable_dates else None,
+        "off_calendar": [str(d) for d in sorted(off_calendar)],
         "split_jumps": detect_split_jumps(clean),
     }
 
@@ -249,7 +329,7 @@ def format_coverage(cov: dict) -> str:
     """Human-readable coverage report for one symbol."""
     lines = []
     lines.append(f"=== Coverage: {cov['symbol']} ===")
-    lines.append(f"sessions: total={cov['total_sessions']} "
+    lines.append(f"sessions: total={cov['total_sessions']} (XNYS trading days) "
                  f"usable={cov['usable_sessions']} skipped={cov['skipped_sessions']}")
     lines.append(f"usable range: {cov['first_usable']} -> {cov['last_usable']}")
     if cov["skip_reasons"]:
@@ -270,6 +350,9 @@ def format_coverage(cov: dict) -> str:
                          f"{j['gap_return']*100:+.1f}%")
     else:
         lines.append("split-jump tripwire: clean (no flags)")
+    if cov.get("off_calendar"):
+        lines.append(f"!! OFF-CALENDAR: bars on {len(cov['off_calendar'])} non-XNYS-trading "
+                     f"day(s) (data error): {cov['off_calendar'][:10]}")
     return "\n".join(lines)
 
 
@@ -280,8 +363,8 @@ def prepare_symbol(raw: pd.DataFrame, symbol: str, source_tz: str = "UTC"):
     """
     et = normalize_bars(raw, source_tz=source_tz)
     rth = to_rth(et)
-    clean, skips, all_dates = validate_sessions(rth, symbol)
-    cov = build_coverage(symbol, all_dates, skips, clean)
+    clean, skips, expected, off_cal = validate_sessions(rth, symbol)
+    cov = build_coverage(symbol, expected, skips, clean, off_cal)
     return clean, skips, cov
 
 

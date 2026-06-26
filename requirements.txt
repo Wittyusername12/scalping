@@ -5,7 +5,8 @@ numpy>=1.24
 
 # data acquisition (scripts/fetch_data.py — run locally where egress is allowed)
 alpaca-py>=0.20
-pyarrow>=14.0          # parquet engine for the data cache
+pyarrow>=14.0                  # parquet engine for the data cache
+pandas_market_calendars>=4.0  # XNYS trading-day & early-close calendar (validation)
 
 # dev / test
 pytest>=7.0

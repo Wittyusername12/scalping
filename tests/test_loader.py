@@ -2,7 +2,8 @@
 
 Synthetic frames only — the real network pull is in scripts/fetch_data.py and is
 run separately. Focus: UTC->ET (incl. DST), RTH filter, OR/entry/exit skip logic,
-the split-jump tripwire, and the coverage report.
+the XNYS calendar (holiday vs no_data, calendar-driven early close), the
+split-jump tripwire, and the coverage report.
 """
 
 from __future__ import annotations
@@ -29,6 +30,12 @@ def _usable_day(date, price=100.0, start="09:30", end="15:59"):
     """A full RTH session: complete OR + entry windows AND the 15:50 flatten bar."""
     idx = pd.date_range(f"{date} {start}", f"{date} {end}", freq="1min", tz=ET)
     return _et_bars(idx, price)
+
+
+def _full_schedule(dates):
+    """Inject a synthetic XNYS schedule of normal (16:00) trading days."""
+    return {pd.Timestamp(d).date(): {"close_time": dt.time(16, 0), "early_close": False}
+            for d in dates}
 
 
 # --- normalization: UTC -> ET (DST-aware) ---------------------------------
@@ -68,65 +75,113 @@ def test_to_rth_drops_pre_and_post_market():
     assert rth.index[-1].time() == dt.time(15, 59)  # 16:00 exclusive
 
 
-# --- strict validation: OR / entry / exit completeness --------------------
+# --- strict validation: OR / entry / exit completeness (single trading day) -
 
 def test_complete_session_is_usable():
-    clean, skips, dates = loader.validate_sessions(_usable_day("2024-06-03"), "SPY")
-    assert skips == []
-    assert len(dates) == 1
+    clean, skips, expected, off = loader.validate_sessions(_usable_day("2024-06-03"), "SPY")
+    assert skips == [] and off == []
+    assert expected == [dt.date(2024, 6, 3)]
     assert not clean.empty
 
 
 def test_missing_0930_bar_skips_or_window():
     bars = _usable_day("2024-06-03").drop(pd.Timestamp("2024-06-03 09:30", tz=ET))
-    clean, skips, _ = loader.validate_sessions(bars, "SPY")
+    clean, skips, _, _ = loader.validate_sessions(bars, "SPY")
     assert clean.empty
     assert len(skips) == 1 and skips[0]["reason"] == "or_window_incomplete"
 
 
 def test_or_window_gap_skips():
     bars = _usable_day("2024-06-03").drop(pd.Timestamp("2024-06-03 09:35", tz=ET))
-    _, skips, _ = loader.validate_sessions(bars, "SPY")
-    assert skips[0]["reason"] == "or_window_incomplete"
-    assert "09:35" in skips[0]["detail"]
+    _, skips, _, _ = loader.validate_sessions(bars, "SPY")
+    assert skips[0]["reason"] == "or_window_incomplete" and "09:35" in skips[0]["detail"]
 
 
 def test_entry_window_gap_skips():
     bars = _usable_day("2024-06-03").drop(pd.Timestamp("2024-06-03 10:30", tz=ET))
-    _, skips, _ = loader.validate_sessions(bars, "SPY")
-    assert skips[0]["reason"] == "entry_window_gap"
-    assert "10:30" in skips[0]["detail"]
+    _, skips, _, _ = loader.validate_sessions(bars, "SPY")
+    assert skips[0]["reason"] == "entry_window_gap" and "10:30" in skips[0]["detail"]
 
 
 def test_or_takes_precedence_over_entry_in_reason():
     bars = _usable_day("2024-06-03").drop([pd.Timestamp("2024-06-03 09:31", tz=ET),
                                            pd.Timestamp("2024-06-03 10:30", tz=ET)])
-    _, skips, _ = loader.validate_sessions(bars, "SPY")
+    _, skips, _, _ = loader.validate_sessions(bars, "SPY")
     assert skips[0]["reason"] == "or_window_incomplete"
 
 
 def test_eleven_oclock_bar_not_required():
-    # entry-window coverage is [09:45, 11:00) -> the 11:00 bar itself is optional
     bars = _usable_day("2024-06-03").drop(pd.Timestamp("2024-06-03 11:00", tz=ET))
-    _, skips, _ = loader.validate_sessions(bars, "SPY")
+    _, skips, _, _ = loader.validate_sessions(bars, "SPY")
     assert skips == []
 
 
-def test_early_close_half_day_skips_exit_bar_missing():
-    # session ends 13:00 (no 15:50 flatten bar) -> must be skipped, not usable
-    idx = pd.date_range("2024-07-03 09:30", "2024-07-03 13:00", freq="1min", tz=ET)
-    clean, skips, _ = loader.validate_sessions(_et_bars(idx), "SPY")
+def test_exit_bar_missing_on_full_day_skips():
+    # a 15:50 gap on a normal trading day -> can't flatten -> skip
+    bars = _usable_day("2024-06-03").drop(pd.Timestamp("2024-06-03 15:50", tz=ET))
+    _, skips, _, _ = loader.validate_sessions(bars, "SPY")
+    assert skips[0]["reason"] == "exit_bar_missing" and "15:50" in skips[0]["detail"]
+
+
+# --- XNYS calendar: holiday vs no_data, early-close handling --------------
+
+def test_holiday_absent_and_outage_is_no_data():
+    # Real July 2024: 07-04 is a holiday (correctly absent), 07-03 an early close,
+    # 07-05 a normal trading day. We provide 07-02, 07-03, 07-08 and OMIT 07-05
+    # (a trading day -> outage) and 07-04 (a holiday -> not a skip).
+    frame = pd.concat([
+        _usable_day("2024-07-02"),
+        _et_bars(pd.date_range("2024-07-03 09:30", "2024-07-03 13:00", freq="1min", tz=ET)),
+        _usable_day("2024-07-08"),
+    ]).sort_index()
+    clean, skips, expected, off = loader.validate_sessions(frame, "SPY")
+
+    assert dt.date(2024, 7, 4) not in expected          # holiday: not in the universe
+    assert off == []                                     # no off-calendar bars
+    reasons = {s["date"]: s["reason"] for s in skips}
+    assert reasons[dt.date(2024, 7, 5)] == "no_data"     # trading day, absent -> outage
+    assert reasons[dt.date(2024, 7, 3)] == "half_day"    # early close, SKIP_HALF_DAYS
+
+    cov = loader.build_coverage("SPY", expected, skips, clean, off)
+    assert cov["total_sessions"] == 4                    # 07-02,03,05,08 (not 07-04)
+    assert cov["usable_sessions"] == 2                   # 07-02, 07-08
+    assert cov["skip_reasons"] == {"half_day": 1, "no_data": 1}
+
+
+def test_early_close_half_day_skipped_by_default():
+    # 2024-07-03 closes 13:00; SKIP_HALF_DAYS is True -> skipped as half_day
+    bars = _et_bars(pd.date_range("2024-07-03 09:30", "2024-07-03 13:00", freq="1min", tz=ET))
+    clean, skips, _, _ = loader.validate_sessions(bars, "SPY")
     assert clean.empty
-    assert skips[0]["reason"] == "exit_bar_missing"
-    assert "15:50" in skips[0]["detail"]
+    assert skips[0]["reason"] == "half_day" and "13:00" in skips[0]["detail"]
 
 
-def test_exit_checked_after_entry_window():
-    # both an entry gap and a missing 15:50 -> entry reason wins (checked first)
-    bars = _usable_day("2024-06-03").drop(
-        [pd.Timestamp("2024-06-03 10:30", tz=ET), pd.Timestamp("2024-06-03 15:50", tz=ET)])
-    _, skips, _ = loader.validate_sessions(bars, "SPY")
-    assert skips[0]["reason"] == "entry_window_gap"
+def test_early_close_validated_against_actual_close_when_traded(monkeypatch):
+    # With SKIP_HALF_DAYS off, an early-close day is validated against its real
+    # 13:00 close -> the required flatten bar is 12:50, not 15:50.
+    monkeypatch.setattr(config, "SKIP_HALF_DAYS", False)
+    bars = _et_bars(pd.date_range("2024-07-03 09:30", "2024-07-03 13:00", freq="1min", tz=ET))
+    _, skips, _, _ = loader.validate_sessions(bars, "SPY")
+    assert skips == []  # 12:50 flatten bar present -> usable
+
+    bars_gap = bars.drop(pd.Timestamp("2024-07-03 12:50", tz=ET))
+    _, skips2, _, _ = loader.validate_sessions(bars_gap, "SPY")
+    assert skips2[0]["reason"] == "exit_bar_missing" and "12:50" in skips2[0]["detail"]
+
+
+def test_off_calendar_bars_flagged():
+    # bars on 2024-07-04 (a holiday) -> off-calendar, excluded from clean
+    frame = pd.concat([
+        _usable_day("2024-07-03", start="09:30", end="15:59"),  # provide a normal-shaped day...
+        _usable_day("2024-07-05"),
+    ]).sort_index()
+    # inject a schedule that says 07-03 was NOT a trading day, 07-05 was
+    sched = _full_schedule(["2024-07-05"])
+    clean, skips, expected, off = loader.validate_sessions(frame, "SPY", schedule=sched)
+    assert off == [dt.date(2024, 7, 3)]
+    assert expected == [dt.date(2024, 7, 5)]
+    cov = loader.build_coverage("SPY", expected, skips, clean, off)
+    assert cov["off_calendar"] == ["2024-07-03"]
 
 
 # --- split-jump tripwire --------------------------------------------------
@@ -146,17 +201,18 @@ def test_no_split_jump_when_normal():
     assert loader.detect_split_jumps(clean) == []
 
 
-# --- coverage report ------------------------------------------------------
+# --- coverage report (injected schedule to avoid full-range flooding) -------
 
 def test_coverage_report_counts_and_per_year():
     frame = pd.concat([
-        _usable_day("2023-06-01"),                                                  # usable
-        _usable_day("2023-06-02").drop(pd.Timestamp("2023-06-02 10:30", tz=ET)),    # entry gap
-        _usable_day("2024-06-03"),                                                  # usable
+        _usable_day("2023-06-01"),
+        _usable_day("2023-06-02").drop(pd.Timestamp("2023-06-02 10:30", tz=ET)),  # entry gap
+        _usable_day("2024-06-03"),
     ]).sort_index()
+    sched = _full_schedule(["2023-06-01", "2023-06-02", "2024-06-03"])
 
-    clean, skips, dates = loader.validate_sessions(frame, "QQQ")
-    cov = loader.build_coverage("QQQ", dates, skips, clean)
+    clean, skips, expected, off = loader.validate_sessions(frame, "QQQ", schedule=sched)
+    cov = loader.build_coverage("QQQ", expected, skips, clean, off)
 
     assert cov["total_sessions"] == 3
     assert cov["usable_sessions"] == 2
