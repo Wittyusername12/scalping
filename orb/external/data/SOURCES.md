@@ -34,30 +34,35 @@ For a backtest the day the data actually hit is the day the market moved. The
 2025 government shutdown shifted several late-2025 releases; actual dates are kept
 and flagged (below).
 
-**FOMC — "announcement days only" = entries carrying a formal FOMC _Statement_.**
-The Fed labels genuine policy statements "Statement" and administrative facility
-actions "Press Release". We include every calendar entry with a **Statement**
-(scheduled rate decisions + emergency cuts + notation-vote *statements*) and the
-announcement date = the statement's press-release date. We exclude the cancelled
-meeting and the "Press Release"-only facility actions (documented below).
+**FOMC — strict published-schedule policy.** The macro filter must only skip
+events that were on the published schedule in advance, because that is what a
+live system could actually act on. So we include **all scheduled FOMC meeting
+announcement days** (announcement date = the meeting's "Statement" press-release
+date) **plus the two March 2020 emergency rate cuts** (2020-03-03, 2020-03-15),
+which are kept by explicit decision. Every *other* unscheduled Fed statement is
+**excluded** — it was not knowable ahead of time, so skip-listing it is hindsight;
+we trade through those days. The cancelled meeting and "Press Release"-only
+facility actions are likewise excluded (documented below).
 
 ## Counts (2018-01-01 → present)
 
 | year | CPI | NFP | FOMC | total |
 |---|---|---|---|---|
 | 2018 | 12 | 12 | 8 | 32 |
-| 2019 | 13 | 12 | 9 | 34 |
-| 2020 | 13 | 13 | 11 | 37 |
+| 2019 | 13 | 12 | 8 | 33 |
+| 2020 | 13 | 13 | 9 | 35 |
 | 2021 | 13 | 12 | 8 | 33 |
 | 2022 | 13 | 12 | 8 | 33 |
 | 2023 | 13 | 12 | 8 | 33 |
 | 2024 | 13 | 14 | 8 | 35 |
-| 2025 | 11 | 11 | 9 | 31 |
+| 2025 | 11 | 11 | 8 | 30 |
 | 2026 (YTD) | 6 | 6 | 4 | 16 |
-| **all** | **107** | **104** | **73** | **284** |
+| **all** | **107** | **104** | **69** | **280** |
 
-284 rows; 281 unique calendar dates (3 dates are both CPI and FOMC — see
-collisions). 2026 is partial (through the June data in the source files).
+280 rows; 277 unique calendar dates (3 dates are both CPI and FOMC — see
+collisions). 2026 is partial (through the June data in the source files). FOMC is
+69 under the strict policy (8 scheduled/year, except 2020 = 7 scheduled + 2
+emergency cuts, and 2026 = 4 YTD).
 
 ## Multi-date months (more than one release that month — all kept)
 
@@ -67,21 +72,25 @@ collisions). 2026 is partial (through the June data in the source files).
 - **NFP**: 2020-05 (08, 11), 2024-01 (05, 10), 2024-08 (02, 21 — 08-21 is the CES
   preliminary benchmark revision).
 
-## FOMC non-scheduled entries INCLUDED (flagged for review)
+## FOMC non-scheduled entries INCLUDED (the only two)
 
 | date | nature |
 |---|---|
-| 2019-10-11 | unscheduled (meeting Oct 4); reserve-management / T-bill purchase announcement; formal Statement |
-| 2020-03-03 | emergency 50bp cut; unscheduled meeting labeled Mar 2, Statement released Mar 3 |
-| 2020-03-15 | emergency 100bp cut; unscheduled **Sunday** announcement — **non-session day** (won't skip a session) |
-| 2020-03-23 | notation vote; uncapped QE + credit facilities; formal Statement |
-| 2020-08-27 | notation vote; new policy framework (avg inflation targeting); formal Statement |
-| 2025-08-22 | notation vote; 5-year framework review; Statement on Longer-Run Goals |
-
-If you want a strict "scheduled rate decisions + the two emergency cuts" set,
-drop 2019-10-11, 2020-03-23, 2020-08-27, and 2025-08-22.
+| 2020-03-03 | emergency 50bp cut; unscheduled meeting labeled Mar 2, Statement released Mar 3 — kept by explicit decision |
+| 2020-03-15 | emergency 100bp cut; unscheduled **Sunday** announcement — **non-session day** (won't skip a session); kept by explicit decision |
 
 ## FOMC entries EXCLUDED (documented)
+
+**Unscheduled Fed statements — excluded under the strict published-schedule policy**
+(not knowable in advance; skip-listing them would be hindsight a live system could
+not act on, so we trade through these days):
+
+- **2019-10-11** — unscheduled (meeting Oct 4); reserve-management / T-bill purchase announcement.
+- **2020-03-23** — notation-vote Statement; uncapped QE + credit facilities.
+- **2020-08-27** — notation-vote Statement; new policy framework (avg inflation targeting).
+- **2025-08-22** — notation-vote Statement; 5-year framework review (Statement on Longer-Run Goals).
+
+**Other excluded entries:**
 
 - **2020-03-17/18** — scheduled meeting **cancelled** (no statement).
 - **2020-03-19** — notation vote (dollar swap lines); labeled "Press Release", not "Statement".

@@ -19,7 +19,7 @@ def _events():
 def test_loads_and_event_types_valid():
     ev = _events()
     assert set(ev["event_type"].unique()) <= set(config.MACRO_SKIP_EVENT_TYPES)
-    assert len(ev) == 284  # total rows (see SOURCES.md)
+    assert len(ev) == 280  # total rows (see SOURCES.md)
 
 
 def test_counts_per_category():
@@ -27,7 +27,7 @@ def test_counts_per_category():
     counts = ev["event_type"].value_counts().to_dict()
     assert counts["CPI"] == 107
     assert counts["NFP"] == 104
-    assert counts["FOMC"] == 73
+    assert counts["FOMC"] == 69  # strict policy: scheduled + 2 emergency cuts only
 
 
 def test_counts_per_year():
@@ -39,7 +39,9 @@ def test_counts_per_year():
         by_year.setdefault((d.year, et), 0)
         by_year[(d.year, et)] += 1
     # spot-check the years with non-standard counts (see SOURCES.md table)
-    assert by_year[(2020, "FOMC")] == 11
+    assert by_year[(2019, "FOMC")] == 8   # strict: 10-11 dropped
+    assert by_year[(2020, "FOMC")] == 9   # 7 scheduled + 2 emergency cuts
+    assert by_year[(2025, "FOMC")] == 8   # strict: 08-22 dropped
     assert by_year[(2024, "NFP")] == 14
     assert by_year[(2025, "CPI")] == 11
     assert by_year[(2026, "FOMC")] == 4
@@ -60,12 +62,8 @@ def test_no_duplicate_rows():
 def test_known_included_fomc_dates_present():
     skip = mc.load_default_skip_dates()
     for d in [
-        dt.date(2020, 3, 3),   # emergency cut
-        dt.date(2020, 3, 15),  # emergency cut (Sunday)
-        dt.date(2020, 3, 23),  # notation-vote Statement (QE)
-        dt.date(2020, 8, 27),  # framework Statement
-        dt.date(2025, 8, 22),  # framework Statement
-        dt.date(2019, 10, 11), # unscheduled Statement
+        dt.date(2020, 3, 3),   # emergency cut (kept by explicit decision)
+        dt.date(2020, 3, 15),  # emergency cut (Sunday, kept by explicit decision)
     ]:
         assert d in skip
 
@@ -73,10 +71,16 @@ def test_known_included_fomc_dates_present():
 def test_excluded_fomc_dates_absent():
     skip = mc.load_default_skip_dates()
     for d in [
-        dt.date(2020, 3, 17),  # cancelled meeting
-        dt.date(2020, 3, 18),  # cancelled meeting
-        dt.date(2020, 3, 19),  # 'Press Release' only (swap lines)
-        dt.date(2020, 3, 31),  # 'Press Release' only (FIMA repo)
+        # strict published-schedule policy: unscheduled Fed statements dropped
+        dt.date(2019, 10, 11),  # reserve-mgmt / T-bill announcement
+        dt.date(2020, 3, 23),   # notation-vote Statement (uncapped QE)
+        dt.date(2020, 8, 27),   # framework Statement
+        dt.date(2025, 8, 22),   # 5-year framework review Statement
+        # other exclusions
+        dt.date(2020, 3, 17),   # cancelled meeting
+        dt.date(2020, 3, 18),   # cancelled meeting
+        dt.date(2020, 3, 19),   # 'Press Release' only (swap lines)
+        dt.date(2020, 3, 31),   # 'Press Release' only (FIMA repo)
     ]:
         assert d not in skip
 
@@ -104,6 +108,6 @@ def test_cpi_february_multidate_months():
 def test_skip_set_dedupes_collisions():
     ev = _events()
     skip = mc.load_default_skip_dates()
-    # 3 dates are both CPI and FOMC -> 284 rows but 281 unique dates
-    assert len(ev) == 284
-    assert len(skip) == 281
+    # 3 dates are both CPI and FOMC -> 280 rows but 277 unique dates
+    assert len(ev) == 280
+    assert len(skip) == 277

@@ -60,13 +60,16 @@ FOMC_SCHEDULED = [
     "2025-07-30", "2025-09-17", "2025-10-29", "2025-12-10",
     "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",  # year to date
 ]
+# STRICT published-schedule policy: the only non-scheduled FOMC days kept are the
+# two March 2020 emergency rate cuts (kept by explicit user decision). All other
+# unscheduled Fed statements are EXCLUDED -- they were not knowable in advance, so
+# skip-listing them is hindsight a live system could not act on. Trade through them.
+# Dropped vs the earlier compilation:
+#   2019-10-11 (reserve-mgmt/T-bill announcement), 2020-03-23 (uncapped QE),
+#   2020-08-27 (policy framework), 2025-08-22 (5-year framework review).
 FOMC_SPECIAL = [
-    ("2019-10-11", "unscheduled (meeting Oct 4); reserve-management/T-bill purchase announcement; formal Statement (monetary20191011a)"),
-    ("2020-03-03", "emergency 50bp cut; unscheduled meeting labeled Mar 2, Statement released Mar 3 (monetary20200303a)"),
-    ("2020-03-15", "emergency 100bp cut; unscheduled SUNDAY announcement (monetary20200315a) - NON-SESSION day"),
-    ("2020-03-23", "notation vote; uncapped QE + credit facilities; formal Statement (monetary20200323a)"),
-    ("2020-08-27", "notation vote; new policy framework (avg inflation targeting); formal Statement (monetary20200827a)"),
-    ("2025-08-22", "notation vote; 5-year framework review; Statement on Longer-Run Goals (monetary20250822a)"),
+    ("2020-03-03", "emergency 50bp cut; unscheduled meeting labeled Mar 2, Statement released Mar 3 (monetary20200303a); kept by explicit decision"),
+    ("2020-03-15", "emergency 100bp cut; unscheduled SUNDAY announcement (monetary20200315a) - NON-SESSION day; kept by explicit decision"),
 ]
 
 
