@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Real market / external data stays out of git (only synthetic fixtures are committed)
+data/raw/
+data/cache/
+data/external/
+*.parquet
+*.feather
+
+# Run outputs
+outputs/
+
+# Research log is generated per run
+research_log.jsonl
