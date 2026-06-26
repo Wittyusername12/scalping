@@ -48,6 +48,13 @@ def test_frozen_strategy_parameters_match_spec():
     assert config.NOTIONAL_CAP_PCT == 0.30
 
 
+def test_slippage_constant_is_in_cents():
+    # Tripwire: SLIPPAGE_CENTS_PER_SHARE is in CENTS to match its name and
+    # fill_price's cents-in contract (fill_price divides by 100). 2.0 cents =
+    # $0.02 one-way base; 1x/2x/3x -> 2.0/4.0/6.0 cents.
+    assert config.SLIPPAGE_CENTS_PER_SHARE == 2.0
+
+
 def test_resolved_conventions_are_pinned():
     assert config.SESSION_TZ == "America/New_York"
     assert config.BAR_LABEL == "interval_start"

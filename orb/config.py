@@ -185,8 +185,8 @@ COMMISSION = 0.0                  # §5 / G5: explicitly zero
 # Slippage is an ABSOLUTE cents/share price offset applied on EVERY fill, both
 # legs (B3) -- never the library's relative spread. The base is a modeled cost
 # assumption (NOT a frozen strategy parameter); the multiplier is the real stress.
-SLIPPAGE_CENTS_PER_SHARE = 0.02   # one-way base (~upper end for these ETFs / SPYM)
-SLIPPAGE_STRESS_MULTIPLIERS = (1, 2, 3)  # 1x / 2x / 3x  ->  2c / 4c / 6c
+SLIPPAGE_CENTS_PER_SHARE = 2.0    # one-way base in CENTS/share (fill_price divides by 100); upper end for these ETFs / SPYM
+SLIPPAGE_STRESS_MULTIPLIERS = (1, 2, 3)  # 1x / 2x / 3x  ->  2.0 / 4.0 / 6.0 cents/share
 GATE_SLIPPAGE_MULTIPLIER = 2      # §8: expectancy must be positive after 2x slippage
 
 # --- Live instrument price levels for the gate (I11) ----------------------
