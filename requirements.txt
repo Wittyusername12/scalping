@@ -3,5 +3,9 @@ backtesting>=0.3.3
 pandas>=2.0
 numpy>=1.24
 
+# data acquisition (scripts/fetch_data.py — run locally where egress is allowed)
+alpaca-py>=0.20
+pyarrow>=14.0          # parquet engine for the data cache
+
 # dev / test
 pytest>=7.0

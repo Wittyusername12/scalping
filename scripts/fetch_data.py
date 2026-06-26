@@ -30,11 +30,13 @@ from orb.data import loader
 from orb.external import vix as vixmod
 
 START_YEAR = 2018
+# Keep one trading day before 2018-01-01 so the first session (2018-01-02) has a
+# strictly-prior VIX close for the no-lookahead prior-day join.
+VIX_LOWER_BOUND = dt.date(2017, 12, 29)
 CBOE_VIX_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
-YAHOO_VIX_URL = (
-    "https://query1.finance.yahoo.com/v7/finance/download/%5EVIX"
-    "?period1=1514764800&period2=9999999999&interval=1d&events=history"
-)
+# Fallback: Stooq daily CSV (no auth). Columns: Date,Open,High,Low,Close,Volume.
+# (Yahoo's v7 /finance/download CSV endpoint was decommissioned in 2023.)
+STOOQ_VIX_URL = "https://stooq.com/q/d/l/?s=^vix&i=d"
 
 
 # --------------------------------------------------------------------------
@@ -55,11 +57,14 @@ def _fetch_year(client, symbol: str, year: int, adjustment) -> pd.DataFrame:
     from alpaca.data.timeframe import TimeFrame
     from alpaca.data.enums import DataFeed
 
-    end = min(dt.datetime(year + 1, 1, 1), dt.datetime.now())
+    utc = dt.timezone.utc
+    # tz-AWARE UTC bounds: a naive datetime.now() is LOCAL time that Alpaca reads
+    # as UTC, which on an ET host would drop the most recent ~4-5h of bars.
+    end = min(dt.datetime(year + 1, 1, 1, tzinfo=utc), dt.datetime.now(utc))
     req = StockBarsRequest(
         symbol_or_symbols=symbol,
         timeframe=TimeFrame.Minute,
-        start=dt.datetime(year, 1, 1),
+        start=dt.datetime(year, 1, 1, tzinfo=utc),
         end=end,
         adjustment=adjustment,                 # Adjustment.SPLIT
         feed=DataFeed.SIP,                     # full history > 15 min old on free plans
@@ -82,11 +87,16 @@ def fetch_symbol(client, symbol: str, this_year: int) -> pd.DataFrame:
     frames = []
     for year in range(START_YEAR, this_year + 1):
         path = loader.raw_path(symbol, year)
-        if path.exists():
+        # Never treat the in-progress current year as a complete cacheable
+        # artifact -- always re-pull it so the dataset stays "... -> present".
+        if path.exists() and year != this_year:
             frames.append(pd.read_parquet(path))
             print(f"  {symbol} {year}: cached")
             continue
         df = _fetch_year(client, symbol, year, Adjustment.SPLIT)
+        if df.empty:
+            sys.exit(f"ERROR: empty {symbol} {year} from Alpaca -- refusing to "
+                     f"cache a zero-bar year (check keys / SIP entitlement / range).")
         df.to_parquet(path)
         frames.append(df)
         print(f"  {symbol} {year}: pulled {len(df)} bars")
@@ -94,20 +104,26 @@ def fetch_symbol(client, symbol: str, this_year: int) -> pd.DataFrame:
 
 
 def verify_no_split_distortion(client, symbol: str, this_year: int) -> None:
-    """SPY/QQQ have no splits in this window, so split-adjusted == raw. Pull a
-    sample year RAW and assert it equals the split-adjusted cache; any difference
-    is a red flag, not normal."""
+    """SPY/QQQ have no splits in this window, so split-adjusted == raw. Cross-check
+    a COMPLETE prior year (this_year-1): pull it RAW and assert it matches the
+    split-adjusted cache across all OHLC. Any difference is a red flag, not normal."""
     from alpaca.data.enums import Adjustment
 
-    raw_y = _fetch_year(client, symbol, this_year, Adjustment.RAW)
-    split_y = pd.read_parquet(loader.raw_path(symbol, this_year))
+    yr = this_year - 1
+    split_path = loader.raw_path(symbol, yr)
+    if not split_path.exists():
+        print(f"  {symbol}: no cached {yr} to cross-check split-vs-raw")
+        return
+    raw_y = _fetch_year(client, symbol, yr, Adjustment.RAW)
+    split_y = pd.read_parquet(split_path)
     common = raw_y.index.intersection(split_y.index)
     if len(common) == 0:
-        print(f"  {symbol}: no overlap to cross-check split-vs-raw")
+        print(f"  {symbol} {yr}: !! no overlap to cross-check split-vs-raw (investigate)")
         return
-    diff = (raw_y.loc[common, "close"] - split_y.loc[common, "close"]).abs().max()
+    cols = ["open", "high", "low", "close"]
+    diff = (raw_y.loc[common, cols] - split_y.loc[common, cols]).abs().to_numpy().max()
     flag = "" if diff < 1e-6 else "  !! RED FLAG: split-adjusted != raw"
-    print(f"  {symbol}: split-vs-raw max close diff = {diff:.6g}{flag}")
+    print(f"  {symbol} {yr}: split-vs-raw max OHLC diff = {diff:.6g}{flag}")
 
 
 # --------------------------------------------------------------------------
@@ -127,20 +143,23 @@ def fetch_vix() -> pd.DataFrame:
             "vix_close": raw["CLOSE"].astype(float),
         })
         src = "Cboe"
-    except Exception as exc:  # noqa: BLE001 — fall back to Yahoo
-        print(f"  Cboe fetch failed ({exc}); trying Yahoo")
-        raw = pd.read_csv(YAHOO_VIX_URL)
+    except Exception as exc:  # noqa: BLE001 — fall back to Stooq
+        print(f"  Cboe fetch failed ({exc}); trying Stooq")
+        raw = pd.read_csv(STOOQ_VIX_URL)
         out = pd.DataFrame({
             "date": pd.to_datetime(raw["Date"]).dt.date,
             "vix_close": raw["Close"].astype(float),
         })
-        src = "Yahoo"
+        src = "Stooq"
     out = out.dropna().sort_values("date")
-    out = out[out["date"] >= dt.date(START_YEAR, 1, 1)]
+    out = out[out["date"] >= VIX_LOWER_BOUND]   # keep one prior day before 2018-01-02
+    if out.empty:
+        raise SystemExit("VIX source returned no usable rows after the date filter "
+                         "-- check the column mapping / source URL.")
     out.to_csv(loader.vix_csv_path(), index=False)
     print(f"  VIX: {len(out)} daily closes from {src} "
           f"({out['date'].iloc[0]} -> {out['date'].iloc[-1]})")
-    # sanity: the prior-day join must work without same-day leakage
+    # sanity: the prior-day join must load without error (no same-day leakage)
     vixmod.load_vix_csv(loader.vix_csv_path())
     return out
 

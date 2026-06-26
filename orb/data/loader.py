@@ -10,9 +10,14 @@ Pipeline per symbol:
   raw bars --normalize_bars--> ET OHLCV  --to_rth--> RTH bars
            --validate_sessions--> (clean usable bars, skip log, coverage)
 
-Validation (strict, per the spec's §6 data rules):
+Validation (strict). These are implementation choices that make the data safe
+for the backtest -- not literal spec §6 text:
   - A session must have a 09:30 ET bar and a COMPLETE opening range (09:30-09:45).
   - The entry-window 1-min coverage (09:45-11:00) must have no gaps.
+  - The 15:50 ET flatten bar must exist -- so a position can always be flattened
+    and never leaks into the next session. Sessions without it (scheduled
+    early-close half-days, or a 15:50 data gap) are SKIPPED; this is how the
+    backtest's SKIP_HALF_DAYS intent is honored at the data layer, calendar-free.
   - Otherwise the whole session is SKIPPED and logged with the reason.
   - A defensive split-jump tripwire FLAGS (does not fix) any overnight move only
     a split could explain -- it must not fire for SPY/QQQ in this window.
@@ -138,8 +143,9 @@ def validate_sessions(rth: pd.DataFrame, symbol: str):
       clean_bars    : RTH 1-min bars for usable sessions only (sorted)
       skips         : list of {symbol, date, reason, detail}
       session_dates : every ET session date seen (usable + skipped)
-    A session is usable iff its OR window (09:30-09:45) is complete AND its
-    entry-window 1-min coverage (09:45-11:00) has no gaps.
+    A session is usable iff its OR window (09:30-09:45) is complete, its
+    entry-window 1-min coverage (09:45-11:00) has no gaps, AND the 15:50 flatten
+    bar exists (else the position could not be flattened and would leak forward).
     """
     session.assert_clean_et_index(rth)
     keys = session.session_date(rth.index)
@@ -158,6 +164,11 @@ def validate_sessions(rth: pd.DataFrame, symbol: str):
             skips.append({"symbol": symbol, "date": d,
                           "reason": "entry_window_gap",
                           "detail": f"missing {len(miss_entry)}: {_fmt_missing(miss_entry)}"})
+        elif config.TIME_EXIT not in present:
+            skips.append({"symbol": symbol, "date": d,
+                          "reason": "exit_bar_missing",
+                          "detail": f"no {config.TIME_EXIT.strftime('%H:%M')} flatten bar "
+                                    f"(scheduled early close / 15:50 gap)"})
         else:
             usable_frames.append(g)
 
@@ -170,8 +181,10 @@ def detect_split_jumps(clean: pd.DataFrame):
     """Flag overnight moves only a split could explain (defensive tripwire).
 
     Compares each usable session's first RTH open (09:30) to the prior usable
-    session's last RTH close. Returns [{prev_date, next_date, overnight_return}]
-    for |return| > SPLIT_JUMP_THRESHOLD. Should be empty for SPY/QQQ.
+    session's last RTH close. Because skipped/holiday/weekend sessions collapse
+    out of `clean`, a flagged pair may span more than one calendar day, so the
+    field is `gap_return` (with `days_apart`), not strictly overnight. Returns
+    pairs with |return| > SPLIT_JUMP_THRESHOLD. Should be empty for SPY/QQQ.
     """
     if clean.empty:
         return []
@@ -190,7 +203,8 @@ def detect_split_jumps(clean: pd.DataFrame):
             ret = nxt_o / prev_c - 1.0
             if abs(ret) > SPLIT_JUMP_THRESHOLD:
                 jumps.append({"prev_date": dates[i - 1], "next_date": dates[i],
-                              "overnight_return": ret})
+                              "days_apart": (dates[i] - dates[i - 1]).days,
+                              "gap_return": ret})
     return jumps
 
 
@@ -252,8 +266,8 @@ def format_coverage(cov: dict) -> str:
         lines.append(f"!! SPLIT-JUMP TRIPWIRE fired {len(jumps)}x (investigate; "
                      f"SPY/QQQ should have none):")
         for j in jumps[:10]:
-            lines.append(f"   {j['prev_date']} -> {j['next_date']}: "
-                         f"{j['overnight_return']*100:+.1f}% overnight")
+            lines.append(f"   {j['prev_date']} -> {j['next_date']} ({j['days_apart']}d): "
+                         f"{j['gap_return']*100:+.1f}%")
     else:
         lines.append("split-jump tripwire: clean (no flags)")
     return "\n".join(lines)

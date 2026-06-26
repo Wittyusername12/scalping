@@ -1,8 +1,8 @@
 """Unit tests for the real-data normalization, validation, and coverage layer.
 
 Synthetic frames only — the real network pull is in scripts/fetch_data.py and is
-run separately. Focus: UTC->ET (incl. DST), RTH filter, OR/entry skip logic, the
-split-jump tripwire, and the coverage report.
+run separately. Focus: UTC->ET (incl. DST), RTH filter, OR/entry/exit skip logic,
+the split-jump tripwire, and the coverage report.
 """
 
 from __future__ import annotations
@@ -25,10 +25,10 @@ def _et_bars(index, price=100.0):
     )
 
 
-def _full_morning(date, start="09:30", end="11:00"):
-    """A session with a complete OR + entry window (09:30..11:00)."""
+def _usable_day(date, price=100.0, start="09:30", end="15:59"):
+    """A full RTH session: complete OR + entry windows AND the 15:50 flatten bar."""
     idx = pd.date_range(f"{date} {start}", f"{date} {end}", freq="1min", tz=ET)
-    return _et_bars(idx)
+    return _et_bars(idx, price)
 
 
 # --- normalization: UTC -> ET (DST-aware) ---------------------------------
@@ -68,83 +68,92 @@ def test_to_rth_drops_pre_and_post_market():
     assert rth.index[-1].time() == dt.time(15, 59)  # 16:00 exclusive
 
 
-# --- strict validation: OR / entry completeness ---------------------------
+# --- strict validation: OR / entry / exit completeness --------------------
 
 def test_complete_session_is_usable():
-    bars = _full_morning("2024-06-03")
-    clean, skips, dates = loader.validate_sessions(bars, "SPY")
+    clean, skips, dates = loader.validate_sessions(_usable_day("2024-06-03"), "SPY")
     assert skips == []
     assert len(dates) == 1
     assert not clean.empty
 
 
 def test_missing_0930_bar_skips_or_window():
-    bars = _full_morning("2024-06-03")
-    bars = bars.drop(pd.Timestamp("2024-06-03 09:30", tz=ET))
+    bars = _usable_day("2024-06-03").drop(pd.Timestamp("2024-06-03 09:30", tz=ET))
     clean, skips, _ = loader.validate_sessions(bars, "SPY")
     assert clean.empty
     assert len(skips) == 1 and skips[0]["reason"] == "or_window_incomplete"
 
 
 def test_or_window_gap_skips():
-    bars = _full_morning("2024-06-03")
-    bars = bars.drop(pd.Timestamp("2024-06-03 09:35", tz=ET))
+    bars = _usable_day("2024-06-03").drop(pd.Timestamp("2024-06-03 09:35", tz=ET))
     _, skips, _ = loader.validate_sessions(bars, "SPY")
     assert skips[0]["reason"] == "or_window_incomplete"
     assert "09:35" in skips[0]["detail"]
 
 
 def test_entry_window_gap_skips():
-    bars = _full_morning("2024-06-03")
-    bars = bars.drop(pd.Timestamp("2024-06-03 10:30", tz=ET))
+    bars = _usable_day("2024-06-03").drop(pd.Timestamp("2024-06-03 10:30", tz=ET))
     _, skips, _ = loader.validate_sessions(bars, "SPY")
     assert skips[0]["reason"] == "entry_window_gap"
     assert "10:30" in skips[0]["detail"]
 
 
 def test_or_takes_precedence_over_entry_in_reason():
-    # both windows broken -> reported as OR incomplete (checked first)
-    bars = _full_morning("2024-06-03")
-    bars = bars.drop([pd.Timestamp("2024-06-03 09:31", tz=ET),
-                      pd.Timestamp("2024-06-03 10:30", tz=ET)])
+    bars = _usable_day("2024-06-03").drop([pd.Timestamp("2024-06-03 09:31", tz=ET),
+                                           pd.Timestamp("2024-06-03 10:30", tz=ET)])
     _, skips, _ = loader.validate_sessions(bars, "SPY")
     assert skips[0]["reason"] == "or_window_incomplete"
 
 
 def test_eleven_oclock_bar_not_required():
     # entry-window coverage is [09:45, 11:00) -> the 11:00 bar itself is optional
-    idx = pd.date_range("2024-06-03 09:30", "2024-06-03 10:59", freq="1min", tz=ET)
-    _, skips, _ = loader.validate_sessions(_et_bars(idx), "SPY")
+    bars = _usable_day("2024-06-03").drop(pd.Timestamp("2024-06-03 11:00", tz=ET))
+    _, skips, _ = loader.validate_sessions(bars, "SPY")
     assert skips == []
+
+
+def test_early_close_half_day_skips_exit_bar_missing():
+    # session ends 13:00 (no 15:50 flatten bar) -> must be skipped, not usable
+    idx = pd.date_range("2024-07-03 09:30", "2024-07-03 13:00", freq="1min", tz=ET)
+    clean, skips, _ = loader.validate_sessions(_et_bars(idx), "SPY")
+    assert clean.empty
+    assert skips[0]["reason"] == "exit_bar_missing"
+    assert "15:50" in skips[0]["detail"]
+
+
+def test_exit_checked_after_entry_window():
+    # both an entry gap and a missing 15:50 -> entry reason wins (checked first)
+    bars = _usable_day("2024-06-03").drop(
+        [pd.Timestamp("2024-06-03 10:30", tz=ET), pd.Timestamp("2024-06-03 15:50", tz=ET)])
+    _, skips, _ = loader.validate_sessions(bars, "SPY")
+    assert skips[0]["reason"] == "entry_window_gap"
 
 
 # --- split-jump tripwire --------------------------------------------------
 
 def test_split_jump_flagged():
-    d1 = _full_morning("2024-06-03")                 # close 100
-    d2 = _et_bars(pd.date_range("2024-06-04 09:30", "2024-06-04 11:00", freq="1min", tz=ET),
-                  price=200.0)                        # open 200 -> +100% overnight
-    clean = pd.concat([d1, d2]).sort_index()
+    clean = pd.concat([_usable_day("2024-06-03", price=100.0),
+                       _usable_day("2024-06-04", price=200.0)]).sort_index()
     jumps = loader.detect_split_jumps(clean)
     assert len(jumps) == 1
-    assert jumps[0]["overnight_return"] == pytest.approx(1.0)
+    assert jumps[0]["gap_return"] == pytest.approx(1.0)
+    assert jumps[0]["days_apart"] == 1
 
 
 def test_no_split_jump_when_normal():
-    d1 = _full_morning("2024-06-03")
-    d2 = _et_bars(pd.date_range("2024-06-04 09:30", "2024-06-04 11:00", freq="1min", tz=ET),
-                  price=100.5)
-    clean = pd.concat([d1, d2]).sort_index()
+    clean = pd.concat([_usable_day("2024-06-03", price=100.0),
+                       _usable_day("2024-06-04", price=100.5)]).sort_index()
     assert loader.detect_split_jumps(clean) == []
 
 
 # --- coverage report ------------------------------------------------------
 
 def test_coverage_report_counts_and_per_year():
-    usable_2023 = _full_morning("2023-06-01")
-    skipped_2023 = _full_morning("2023-06-02").drop(pd.Timestamp("2023-06-02 10:30", tz=ET))
-    usable_2024 = _full_morning("2024-06-03")
-    frame = pd.concat([usable_2023, skipped_2023, usable_2024]).sort_index()
+    frame = pd.concat([
+        _usable_day("2023-06-01"),                                                  # usable
+        _usable_day("2023-06-02").drop(pd.Timestamp("2023-06-02 10:30", tz=ET)),    # entry gap
+        _usable_day("2024-06-03"),                                                  # usable
+    ]).sort_index()
 
     clean, skips, dates = loader.validate_sessions(frame, "QQQ")
     cov = loader.build_coverage("QQQ", dates, skips, clean)
@@ -163,7 +172,7 @@ def test_coverage_report_counts_and_per_year():
 
 def test_prepare_symbol_end_to_end_on_synthetic():
     # raw UTC bars -> normalize -> RTH -> validate -> coverage, all in one
-    idx = pd.date_range("2024-06-03 13:30", "2024-06-03 15:00", freq="1min", tz="UTC")  # 09:30-11:00 EDT
+    idx = pd.date_range("2024-06-03 13:30", "2024-06-03 19:59", freq="1min", tz="UTC")  # 09:30-15:59 EDT
     raw = pd.DataFrame({"open": 100.0, "high": 100.0, "low": 100.0,
                         "close": 100.0, "volume": 1000.0}, index=idx)
     clean, skips, cov = loader.prepare_symbol(raw, "SPY")
