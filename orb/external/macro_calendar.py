@@ -50,6 +50,16 @@ def skip_dates(events: pd.DataFrame) -> set[_dt.date]:
     return set(events["date"].tolist())
 
 
+def load_default_events() -> pd.DataFrame:
+    """Load the committed macro-event list (config.MACRO_EVENTS_PATH)."""
+    return load_macro_events(config.MACRO_EVENTS_PATH)
+
+
+def load_default_skip_dates() -> set[_dt.date]:
+    """The set of ET skip dates from the committed macro-event list."""
+    return skip_dates(load_default_events())
+
+
 def is_skip_session(et_date: _dt.date, skip_set: set[_dt.date]) -> bool:
     """True iff the given ET session date is a macro-skip day.
 

@@ -22,6 +22,9 @@ No magic numbers anywhere else in the codebase -- import from here.
 from __future__ import annotations
 
 import datetime as _dt
+import os as _os
+
+_PKG_DIR = _os.path.dirname(_os.path.abspath(__file__))
 
 
 # =============================================================================
@@ -162,6 +165,11 @@ SKIP_HALF_DAYS = True             # skip scheduled early-close (1:00pm) sessions
 # =============================================================================
 # 3. MODELING / DATA SETTINGS  (not strategy parameters)
 # =============================================================================
+
+# --- Macro-event skip calendar (§4.5, B11) --------------------------------
+# Committed, version-controlled FOMC + CPI + NFP date list (2018-present).
+# Compiled from authoritative sources; see orb/external/data/SOURCES.md.
+MACRO_EVENTS_PATH = _os.path.join(_PKG_DIR, "external", "data", "macro_events.csv")
 
 # --- Symbols (§2) ---------------------------------------------------------
 BACKTEST_SYMBOLS = ("SPY", "QQQ")  # gate must pass on both (standalone, B6)
