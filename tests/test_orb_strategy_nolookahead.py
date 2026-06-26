@@ -251,6 +251,25 @@ def test_breakout_at_first_decision_1000_trades():
     assert enters == [pd.Timestamp(f"{DAY} 10:00", tz=ET)]
 
 
+def test_zero_share_qualifying_breakout_consumes_the_day():
+    # Ratified decision (#3): a qualifying breakout that sizes to <1 share still
+    # uses the day's single shot. Two qualifying breakouts (10:15, 10:30); with
+    # tiny equity the first sizes to 0 -> size_skip -> the 10:30 breakout must
+    # NOT trade (no manufactured re-attempt).
+    feats = base_features()
+    set_breakout(feats, "10:15")
+    set_breakout(feats, "10:30")
+    bars = benign_bars(_mins())
+    strat = run_strategy(build_execution_frame(bars, feats, VIX), account_equity=100.0)
+
+    kinds = [a.kind for _, acts in strat.records for a in acts]
+    assert kinds.count("size_skip") == 1     # the first qualifying breakout, sized to 0
+    assert "enter" not in kinds              # never actually entered
+    assert strat.round_trips == []           # no trade all day
+    skips = [ts for ts, acts in strat.records for a in acts if a.kind == "size_skip"]
+    assert skips == [pd.Timestamp(f"{DAY} 10:15", tz=ET)]  # day consumed at the first, not 10:30
+
+
 def test_macro_skip_day_no_trade():
     feats = set_breakout(base_features(), "10:15")
     bars = benign_bars(_mins())

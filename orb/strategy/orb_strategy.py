@@ -189,7 +189,13 @@ class ORBStrategy(Strategy):
                     skip_dates=self.skip_dates,
                 )
                 if decision.enter:
-                    self._traded_today = True  # first qualifying breakout consumes the day
+                    # The first qualifying breakout consumes the day's one shot.
+                    # Set BEFORE sizing on purpose: a qualifying breakout that
+                    # sizes to <1 share still consumes the day -- no re-attempt --
+                    # mirroring the live rule (the one signal fired; the risk math
+                    # said too small). Deliberate, ratified decision; the backtest
+                    # must not manufacture extra attempts a live system wouldn't take.
+                    self._traded_today = True
                     fill = fill_price(close15, "buy", cents, mult)
                     shares = position_size(self.account_equity, fill, or_low)
                     if shares >= 1:
@@ -200,7 +206,7 @@ class ORBStrategy(Strategy):
                         self._open = (ts, fill, shares)
                         actions.append(Action("enter", fill, shares))
                     else:
-                        actions.append(Action("size_skip", fill, 0))
+                        actions.append(Action("size_skip", fill, 0))  # day still consumed (see above)
 
         # ---- STOP: live from the entry bar forward; gap-through fills worse --
         if self._in_pos and i >= self._entry_bar and low <= self._stop:
